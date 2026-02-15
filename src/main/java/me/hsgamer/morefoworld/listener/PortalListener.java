@@ -2,7 +2,6 @@ package me.hsgamer.morefoworld.listener;
 
 import io.github.projectunified.minelib.plugin.base.BasePlugin;
 import io.github.projectunified.minelib.plugin.listener.ListenerComponent;
-import io.papermc.paper.event.entity.EntityInsideBlockEvent;
 import io.papermc.paper.event.entity.EntityPortalReadyEvent;
 import me.hsgamer.morefoworld.DebugComponent;
 import me.hsgamer.morefoworld.config.PortalConfig;
@@ -41,13 +40,12 @@ public class PortalListener implements ListenerComponent {
 
     @EventHandler
     public void onPortalReady(EntityPortalReadyEvent event) {
-        if (event.getPortalType() != PortalType.NETHER) return;
-        debug.debug("Portal Ready: " + event.getEntity().getWorld());
-        debug.debug("Portal Type: " + event.getPortalType());
-        plugin.get(PortalConfig.class).getWorldFromNetherPortal(event.getEntity().getWorld()).ifPresent(world -> {
-            event.setTargetWorld(world);
-            debug.debug("Set Portal to " + world);
-        });
+        if (event.getPortalType() != PortalType.NETHER) {
+            return;
+        }
+        plugin.get(PortalConfig.class)
+                .getWorldFromNetherPortal(event.getEntity().getWorld())
+                .ifPresent(event::setTargetWorld);
     }
 
     private CompletableFuture<Void> constructEndPlatform(Location location) {
@@ -70,38 +68,30 @@ public class PortalListener implements ListenerComponent {
         }, runnable -> Bukkit.getRegionScheduler().execute(plugin, location, runnable));
     }
 
-    private CompletableFuture<Void> constructNetherPortal(Location location) {
-        return CompletableFuture.runAsync(() -> {
-            // TODO: Construct the nether portal
-        }, runnable -> Bukkit.getRegionScheduler().execute(plugin, location, runnable));
-    }
-
-    private CompletableFuture<Boolean> teleport(Entity entity, Location location, boolean runInScheduler) {
-        if (runInScheduler) {
-            CompletableFuture<Boolean> future = new CompletableFuture<>();
-            entity.getScheduler().execute(plugin, () -> entity.teleportAsync(location).thenAccept(future::complete), null, 1L);
-            return future;
-        } else {
-            return entity.teleportAsync(location);
-        }
+    private CompletableFuture<Boolean> teleport(Entity entity, Location location) {
+        CompletableFuture<Boolean> future = new CompletableFuture<>();
+        entity.getScheduler().execute(plugin, () -> entity.teleportAsync(location).thenAccept(future::complete), null, 1L);
+        return future;
     }
 
     @EventHandler
     public void onPlayerPortal(PlayerPortalEvent event) {
-        if (event.getCause() != PlayerTeleportEvent.TeleportCause.END_PORTAL) return;
+        if (event.getCause() != PlayerTeleportEvent.TeleportCause.END_PORTAL) {
+            return;
+        }
 
         Location from = event.getFrom();
         Location to = event.getTo();
-        debug.debug("Portal Cause: " + event.getCause());
-        debug.debug("From: " + from);
-        debug.debug("To: " + to);
-        Optional<World> worldOptional = plugin.get(PortalConfig.class).getWorldFromEndPortal(from.getWorld());
 
-        worldOptional.ifPresent(world -> {
-            Location clone = to.clone();
-            clone.setWorld(world);
-        });
+        plugin.get(PortalConfig.class)
+                .getWorldFromEndPortal(from.getWorld())
+                .ifPresent(world -> {
+                    Location clone = to.clone();
+                    clone.setWorld(world);
+                    event.setTo(clone);
+                });
     }
+
 
     @EventHandler
     public void onEntityPortal(EntityPortalEvent event) {
@@ -128,78 +118,8 @@ public class PortalListener implements ListenerComponent {
                 future = constructEndPlatform(clone);
             }
             future
-                    .thenCompose(aVoid -> teleport(event.getEntity(), clone, true))
+                    .thenCompose(aVoid -> teleport(event.getEntity(), clone))
                     .thenRun(() -> debug.debug("Teleported to " + clone));
         });
-    }
-
-    @EventHandler(ignoreCancelled = true)
-    public void onEntityInsidePortal(final EntityInsideBlockEvent event) {
-        Block block = event.getBlock();
-        Entity entity = event.getEntity();
-        Material blockTypeInside = block.getType();
-        Location from = entity.getLocation();
-
-        if (portalTeleportCache.containsKey(entity.getUniqueId())) {
-            debug.debug("The entity is being teleported");
-            return;
-        }
-
-        Optional<World> toWorldOptional = switch (blockTypeInside) {
-            case NETHER_PORTAL -> plugin.get(PortalConfig.class).getWorldFromNetherPortal(from.getWorld());
-            case END_PORTAL -> plugin.get(PortalConfig.class).getWorldFromEndPortal(from.getWorld());
-            default -> Optional.empty();
-        };
-        if (toWorldOptional.isEmpty()) return;
-        World toWorld = toWorldOptional.get();
-
-        portalTeleportCache.put(entity.getUniqueId(), blockTypeInside);
-
-        event.setCancelled(true);
-
-        entity.getScheduler().execute(plugin, () -> {
-            Block currentBlock = entity.getLocation().getBlock();
-            if (currentBlock.getType() != blockTypeInside) {
-                debug.debug("The entity is not in the portal");
-                portalTeleportCache.remove(entity.getUniqueId());
-                return;
-            }
-
-            World.Environment fromEnvironment = from.getWorld().getEnvironment();
-            World.Environment toEnvironment = toWorld.getEnvironment();
-            Location to;
-            if (toEnvironment == World.Environment.THE_END) {
-                to = toWorld.getSpawnLocation();
-            } else if (fromEnvironment == World.Environment.NORMAL && toEnvironment == World.Environment.NETHER) {
-                to = from.clone();
-                to.setWorld(toWorld);
-                to.setX(to.getX() / 8);
-                to.setZ(to.getZ() / 8);
-            } else if (fromEnvironment == World.Environment.NETHER && toEnvironment == World.Environment.NORMAL) {
-                to = from.clone();
-                to.setWorld(toWorld);
-                to.setX(to.getX() * 8);
-                to.setZ(to.getZ() * 8);
-            } else {
-                to = from.clone();
-                to.setWorld(toWorld);
-            }
-
-            switch (toEnvironment) {
-                case THE_END -> {
-                    constructEndPlatform(to)
-                            .thenCompose(aVoid -> teleport(entity, to, false))
-                            .thenRun(() -> debug.debug("Teleported to " + to));
-                }
-                case NETHER -> {
-                    constructNetherPortal(to)
-                            .thenCompose(aVoid -> teleport(entity, to, false))
-                            .thenRun(() -> debug.debug("Teleported to " + to));
-                }
-                default -> teleport(entity, to, false).thenRun(() -> debug.debug("Teleported to " + to));
-            }
-
-            portalTeleportCache.remove(entity.getUniqueId());
-        }, null, 1L);
     }
 }
